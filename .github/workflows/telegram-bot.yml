@@ -1,0 +1,79 @@
+name: Telegram PDF to GitHub
+
+on:
+  repository_dispatch:
+    types: [telegram-pdf]
+
+jobs:
+  process-pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Process PDF
+        run: |
+          # Configure git
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@users.noreply.github.com"
+          
+          # Pull latest changes to avoid conflicts
+          git pull --rebase --quiet
+          
+          echo "=== PROCESSING PDF FILE ==="
+          mkdir -p pdfs
+          
+          CLEAN_FILENAME="${{ github.event.client_payload.file_name }}"
+          PDF_FILENAME="pdfs/${CLEAN_FILENAME}"
+          
+          echo "PDF URL: ${{ github.event.client_payload.pdf_url }}"
+          echo "Saving as: $PDF_FILENAME"
+          
+          # Download PDF with retry and resume support for large files
+          echo "Downloading PDF file..."
+          
+          # Use wget with retry and continue support
+          if wget --tries=3 --timeout=120 --continue -O "$PDF_FILENAME" "${{ github.event.client_payload.pdf_url }}"; then
+            echo "✓ PDF downloaded successfully"
+            PDF_SIZE=$(ls -lh "$PDF_FILENAME" | cut -d ' ' -f 5)
+            echo "File size: $PDF_SIZE"
+            
+            # Verify file is not empty and is a valid PDF
+            if [ -s "$PDF_FILENAME" ] && file "$PDF_FILENAME" | grep -q "PDF"; then
+              echo "✓ File verification passed - Valid PDF"
+              
+              git add .
+              git commit -m "Add PDF: $CLEAN_FILENAME"
+              git pull --rebase --quiet
+              git push --quiet
+              
+              echo "✓ PDF upload completed successfully"
+            else
+              echo "✗ Downloaded file is empty, corrupted, or not a PDF"
+              # Check what type of file it actually is
+              file "$PDF_FILENAME"
+              exit 1
+            fi
+          else
+            echo "✗ Failed to download PDF file after 3 attempts"
+            exit 1
+          fi
+
+      - name: Send completion notification
+        if: success()
+        run: |
+          CHAT_ID="${{ github.event.client_payload.chat_id }}"
+          FILENAME="${{ github.event.client_payload.file_name }}"
+          REPO_NAME="${{ github.event.client_payload.repo_name }}"
+          REPO_OWNER="${{ github.event.client_payload.repo_owner }}"
+          
+          if [ -n "$CHAT_ID" ]; then
+            MESSAGE="✅ Upload Complete%0A%0A📄 File: $FILENAME%0A🏷️ Repository: $REPO_NAME%0A%0A🔗 View: https://github.com/$REPO_OWNER/$REPO_NAME/tree/main/pdfs"
+            
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d "chat_id=$CHAT_ID" \
+              -d "text=$MESSAGE"
+            echo "✓ Notification sent successfully"
+          fi
